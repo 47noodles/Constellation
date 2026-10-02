@@ -211,6 +211,79 @@ def bring_up(universe: Universe, game_t: float, wait_s: float = 600.0) -> None:
         print(cmd.split()[0], cmd.split()[1] if len(cmd.split()) > 1 else "", "->", "ok" if reply.get("ok") else reply)
 
 
+class KspLink:
+    """The coordinator's live link to the hidden KSP.
+
+    ``fire`` sends without waiting (used every tick to slave KSP's clock);
+    ``request`` waits for the reply (system sync, checks). Replies to fired
+    commands are drained and dropped so the socket buffer never fills.
+    """
+
+    def __init__(self) -> None:
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", 0))  # Windows refuses recvfrom on a never-bound UDP socket
+        self.sock.setblocking(False)
+        self.last_error: str | None = None
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                self.sock.recvfrom(65535)
+            except (BlockingIOError, ConnectionResetError):
+                return
+
+    def fire(self, cmd: str) -> None:
+        self._drain()
+        try:
+            self.sock.sendto(cmd.encode(), KSP_ADDR)
+        except OSError as e:
+            self.last_error = repr(e)
+
+    # Replies carry no request id, and replies to fired "setut"s can still be in
+    # flight, so each request only accepts a reply with the key its command returns.
+    REPLY_KEY = {"orbitpos": "bodies", "positions": "bodies", "setbody": "body", "setgm": "body",
+                 "parkmoons": "parked", "map": "map", "info": "bodies", "vesselstate": "r", "setut": "ut"}
+
+    def request(self, cmd: str, timeout: float = 2.0) -> dict | None:
+        import time
+
+        want = self.REPLY_KEY.get(cmd.split()[0])
+        self._drain()
+        self.sock.sendto(cmd.encode(), KSP_ADDR)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                reply = json.loads(self.sock.recvfrom(65535)[0].decode())
+            except (BlockingIOError, ConnectionResetError):
+                time.sleep(0.005)
+                continue
+            if "error" in reply or want is None or want in reply:
+                return reply
+        self.last_error = f"timeout: {cmd.split()[0]}"
+        return None
+
+    def sync(self, universe: Universe, game_t: float) -> bool:
+        for cmd in sync_commands(universe, game_t):
+            reply = self.request(cmd)
+            if not reply or not reply.get("ok"):
+                self.last_error = f"{cmd.split()[0]} {cmd.split()[1] if len(cmd.split()) > 1 else ''}: {reply}"
+                return False
+        return True
+
+    def worst_error(self, universe: Universe) -> float | None:
+        """Largest planet position error in KSP's frame after removing its rotation (m)."""
+        pos = self.request("orbitpos")
+        if not pos:
+            return None
+        t = pos["ut"]
+        off, _ = frame_offset(universe, pos)
+        worst = 0.0
+        for bid, name in assignment(universe).items():
+            want = rot_z(zup(universe.orbit_pos(bid, t)), off)
+            worst = max(worst, norm(tuple(a - b for a, b in zip(want, pos["bodies"][name]))))
+        return worst
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("action", choices=["sync", "check", "check-inertial", "commands", "bringup"])

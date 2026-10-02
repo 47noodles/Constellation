@@ -8,8 +8,13 @@ position. Game time is saved to the state file so a restart (or a later
 session) resumes the same orbits: nothing about planet positions is stored
 in NMS.
 
+With --ksp, the coordinator also drives the hidden KSP: on entering a system
+it pushes the universe into KSP's body pool, every tick it sets KSP's clock to
+game time, and every few seconds it measures KSP's planet error.
+
 Control (UDP, port CTL_PORT), one JSON message per datagram:
     {"t": "warp", "warp": 100}   {"t": "pause"}   {"t": "resume"}   {"t": "status"}
+    {"t": "map", "on": true}     (KSP's real map view, with --ksp)
 "status" is answered with the current status object.
 """
 
@@ -23,6 +28,7 @@ import time
 
 from . import protocol
 from .clock import Clock
+from .ksp_link import KspLink
 from .universe import Universe
 
 CTL_PORT = 47813
@@ -30,7 +36,7 @@ log = logging.getLogger("coordinator")
 
 
 class Coordinator:
-    def __init__(self, state_path: str, warp: float = 1.0):
+    def __init__(self, state_path: str, warp: float = 1.0, ksp: bool = False):
         self.state_path = state_path
         self.clock = Clock(warp=warp)
         self.universe: Universe | None = None
@@ -40,6 +46,9 @@ class Coordinator:
         self.last_state_at = 0.0
         self.saved = self._load()
         self.anchor_changes = 0
+        self.ksp = KspLink() if ksp else None
+        self.ksp_synced = False
+        self.ksp_worst_m = None
         self.sock_state = protocol.udp_socket(protocol.NMS_STATE_PORT)
         self.sock_cmd = protocol.udp_socket()
         self.sock_ctl = protocol.udp_socket(CTL_PORT)
@@ -73,6 +82,9 @@ class Coordinator:
         anchor = self.universe.anchor_to_current(tuple(state["player"]), current, t)
         log.info("entered system %s at game_t=%.1f, %d bodies, anchor=%s",
                  self.sys_key, t, len(self.universe.bodies), anchor)
+        if self.ksp is not None:
+            self.ksp_synced = self.ksp.sync(self.universe, t)
+            log.info("KSP sync %s %s", "ok" if self.ksp_synced else "FAILED", self.ksp.last_error or "")
 
     # ---- one tick ----------------------------------------------------------------
     def tick(self) -> None:
@@ -99,11 +111,16 @@ class Coordinator:
         msg = {"t": "nms_targets", "seq": self.seq, "sys": self.sys_key, "game_t": t, "warp": rate,
                "targets": targets, "vel_per_real_s": vels}
         self.sock_cmd.sendto(protocol.encode(msg), (protocol.HOST, protocol.NMS_CMD_PORT))
+        if self.ksp is not None and self.ksp_synced:
+            self.ksp.fire(f"setut {t!r}")  # KSP's clock is a slave of game time
 
     def status(self) -> dict:
         out = {"sys": self.sys_key, "game_t": round(self.clock.now(), 2), "warp": self.clock.warp,
                "paused": self.clock.paused, "seq": self.seq, "anchor_changes": self.anchor_changes,
                "state_age_s": round(time.monotonic() - self.last_state_at, 2) if self.last_state else None}
+        if self.ksp is not None:
+            out["ksp"] = {"synced": self.ksp_synced, "worst_planet_error_m": self.ksp_worst_m,
+                          "last_error": self.ksp.last_error}
         if self.universe is not None:
             out["anchor"] = self.universe.anchor
             t = self.clock.now()
@@ -139,6 +156,8 @@ class Coordinator:
                     self.clock.pause()
                 elif kind == "resume":
                     self.clock.resume()
+                elif kind == "map" and self.ksp is not None:
+                    self.ksp.request("map on" if msg.get("on", True) else "map off")
                 reply = self.status()
             except Exception as e:  # noqa: BLE001 - report to the sender
                 reply = {"error": repr(e)}
@@ -152,6 +171,13 @@ class Coordinator:
             self.tick()
             if started >= next_save:
                 self._save()
+                if self.ksp is not None and self.ksp_synced and self.universe is not None:
+                    try:
+                        err = self.ksp.worst_error(self.universe)
+                        self.ksp_worst_m = None if err is None else round(err, 1)
+                    except Exception as e:  # noqa: BLE001 - KSP trouble must never stop the coordinator
+                        self.ksp.last_error = repr(e)
+                        log.warning("KSP check failed: %r", e)
                 with open(status_path, "w", encoding="utf-8") as f:
                     json.dump(self.status(), f, indent=1)
                 next_save = started + 5.0
@@ -164,11 +190,12 @@ def main() -> None:
     ap.add_argument("--hz", type=float, default=30.0)
     ap.add_argument("--state", default=os.path.join("state", "coordinator.json"))
     ap.add_argument("--status", default=os.path.join("state", "status.json"))
+    ap.add_argument("--ksp", action="store_true", help="drive the hidden KSP (plugin on UDP 47821)")
     args = ap.parse_args()
     os.makedirs("state", exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         handlers=[logging.FileHandler(os.path.join("state", "coordinator.log")), logging.StreamHandler()])
-    Coordinator(args.state, warp=args.warp).run(args.hz, args.status)
+    Coordinator(args.state, warp=args.warp, ksp=args.ksp).run(args.hz, args.status)
 
 
 if __name__ == "__main__":
