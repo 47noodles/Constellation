@@ -168,11 +168,12 @@ def vessel_roundtrip(universe: Universe, body_id: str, r_coord: Vec, v_coord: Ve
     from .orbits import from_state
 
     name = assignment(universe)[body_id]
-    pos = send("orbitpos")
-    off, spread = frame_offset(universe, pos)
-    r_k, v_k = rot_z(zup(r_coord), off), rot_z(zup(v_coord), off)
-    set_reply = send(
-        "vesselstate set {} {!r} {!r} {!r} {!r} {!r} {!r}".format(name, *r_k, *v_k))
+    tc = send("orbitpos")["ut"]
+    off, spread = 0.0, 0.0
+    # the plugin removes KSP's frame rotation itself, at the moment it applies the state
+    body_r, body_v = (zup(x) for x in universe.bodies[body_id].orbit.state_at(tc))
+    set_reply = send("vesselstate setc {} {}".format(
+        name, " ".join(repr(c) for c in (*zup(r_coord), *zup(v_coord), *body_r, *body_v, tc))))
     t0 = set_reply.get("ut") or send("orbitpos")["ut"]  # exact UT the state was applied at
     orbit = from_state(universe.bodies[body_id].mu, zup(r_coord), zup(v_coord), t0)
     time.sleep(wait_s)

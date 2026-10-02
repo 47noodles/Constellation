@@ -135,6 +135,14 @@ namespace Constellation
                 case "vesselstate":
                     // vesselstate                                    -> vessel r, v relative to its body (inertial z-up)
                     // vesselstate set <body> rx ry rz vx vy vz        -> put the vessel on that state (must be on rails)
+                    if (w.Length > 1 && w[1] == "setc")
+                        // vesselstate setc <body> r(3) v(3) bodyPos(3) bodyVel(3) tc : vectors in the
+                        // coordinator's z-up frame; bodyPos/bodyVel are the reference body relative to
+                        // its parent at coordinator time tc, used to remove KSP's frame rotation here,
+                        // in the same frame and at the same UT the state is applied.
+                        return SetVesselStateCoord(Body(w[2]),
+                            new Vector3d(D(w[3]), D(w[4]), D(w[5])), new Vector3d(D(w[6]), D(w[7]), D(w[8])),
+                            new Vector3d(D(w[9]), D(w[10]), D(w[11])), new Vector3d(D(w[12]), D(w[13]), D(w[14])), D(w[15]));
                     return w.Length > 1 && w[1] == "set"
                         ? SetVesselState(Body(w[2]), new Vector3d(D(w[3]), D(w[4]), D(w[5])), new Vector3d(D(w[6]), D(w[7]), D(w[8])))
                         : VesselState();
@@ -364,6 +372,20 @@ namespace Constellation
             o.UpdateFromUT(ut);
             if (v.patchedConicSolver != null) v.patchedConicSolver.Update();
             return "{\"ok\":true,\"ut\":" + N(ut) + ",\"vessel\":" + VesselJson(v) + "}";
+        }
+
+        private static string SetVesselStateCoord(CelestialBody b, Vector3d r, Vector3d vel,
+                                                  Vector3d bodyPos, Vector3d bodyVel, double tc)
+        {
+            double ut = Planetarium.GetUniversalTime();
+            Vector3d want = bodyPos + bodyVel * (ut - tc);           // where the coordinator has the body now
+            Vector3d have = b.orbit.getRelativePositionAtUT(ut);       // where KSP's frame has it now
+            double off = Math.Atan2(have.y, have.x) - Math.Atan2(want.y, want.x);
+            double c = Math.Cos(off), sn = Math.Sin(off);
+            Vector3d rk = new Vector3d(c * r.x - sn * r.y, sn * r.x + c * r.y, r.z);
+            Vector3d vk = new Vector3d(c * vel.x - sn * vel.y, sn * vel.x + c * vel.y, vel.z);
+            string res = SetVesselState(b, rk, vk);
+            return res.Substring(0, res.Length - 1) + ",\"frame_offset_deg\":" + N(off * 180.0 / Math.PI) + "}";
         }
 
         // "ui find <substring>": active objects under any canvas whose name contains it.
