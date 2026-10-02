@@ -10,6 +10,8 @@
 //   bodyorbit <body> <smaScale>           rewrite a body's orbit semi-major axis
 //   map on|off                            KSP's real map view
 //   warp <index>                          TimeWarp.SetRate
+//   dismiss                               close PopupDialogs
+//   ui find|hide <substring>              list or hide active UI objects (e.g. the 1.12 "What's new" window)
 //   shot <file.png>                       screenshot (works without focus)
 using System;
 using System.Collections.Generic;
@@ -100,6 +102,13 @@ namespace Constellation
                 case "warp":
                     TimeWarp.SetRate(int.Parse(w[1], Inv), true, false);
                     return "{\"ok\":true,\"rate\":" + N(TimeWarp.CurrentRate) + "}";
+                case "dismiss":
+                    int closed = 0;
+                    foreach (PopupDialog pd in FindObjectsOfType<PopupDialog>()) { pd.Dismiss(); closed++; }
+                    PopupDialog.ClearPopUps();
+                    return "{\"ok\":true,\"dismissed\":" + closed + "}";
+                case "ui":
+                    return Ui(w.Length > 1 ? w[1] : "find", w.Length > 2 ? w[2] : "");
                 case "shot":
                     ScreenCapture.CaptureScreenshot(w[1]);
                     return "{\"ok\":true,\"file\":" + Q(w[1]) + "}";
@@ -154,6 +163,30 @@ namespace Constellation
             RecomputeSoi(b);
             int touched = ReinitOrbitsAround(b, ut);
             return "{\"ok\":true,\"body\":" + BodyJson(b) + ",\"orbits_reinit\":" + touched + "}";
+        }
+
+        // "ui find <substring>": active objects under any canvas whose name contains it.
+        // "ui hide <substring>": deactivate the first such object that is a direct canvas child.
+        private static string Ui(string mode, string pattern)
+        {
+            var names = new List<string>();
+            foreach (Canvas c in FindObjectsOfType<Canvas>())
+            {
+                foreach (Transform t in c.transform)
+                {
+                    if (!t.gameObject.activeInHierarchy) continue;
+                    if (pattern.Length > 0 && t.name.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (mode == "hide")
+                    {
+                        t.gameObject.SetActive(false);
+                        return "{\"ok\":true,\"hidden\":" + Q(c.name + "/" + t.name) + "}";
+                    }
+                    names.Add(c.name + "/" + t.name);
+                }
+            }
+            var sb = new StringBuilder("{\"objects\":[");
+            for (int i = 0; i < names.Count && i < 80; i++) { if (i > 0) sb.Append(','); sb.Append(Q(names[i])); }
+            return sb.Append("]}").ToString();
         }
 
         // ---- helpers ---------------------------------------------------------------
