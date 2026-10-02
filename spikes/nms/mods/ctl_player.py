@@ -196,8 +196,13 @@ class CtlPlayer(Mod):
         if cmd == "ship":
             mod = getattr(__import__("builtins"), "_constellation_ship", None)
             if mod is None:
-                return {"error": "ship mod not loaded - send: loadmod ctl_ship.py"}
+                return {"error": "ship mod not loaded - send: loadmod ctl_ship.py (or restart)"}
             return mod.handle(words[1:])
+        # Any runtime-loaded mod can register builtins._constellation_<name> with a
+        # handle(words) method and receive "<name> ..." commands without reloading this file.
+        other = getattr(__import__("builtins"), f"_constellation_{cmd}", None)
+        if other is not None and hasattr(other, "handle"):
+            return other.handle(words[1:])
         if cmd == "unload" and len(words) > 1:
             # Detach every hook of a loaded mod (by class name) without reloading anything.
             from pymhf.core.mod_loader import mod_manager

@@ -1,0 +1,8 @@
+t,event,mode,vel_err_mean,vel_err_max,cmd_speed,actual_speed,note
+t,event,mode,vel_err_mean,vel_err_max,cmd_speed,actual_speed,note
+1790953628.952,mode,cruise,0.00,0.00,0.0,0.0,"fwd=(0.0, 0.0, 1.0)"
+1790953645.236,mode,hold,0.00,0.00,0.0,0.0,"fwd=(0.0, 0.0, 1.0)"
+1790953651.368,spin,hold,0.00,0.00,0.0,0.0,True
+1790953651.749,spin_ok,hold,0.00,0.00,0.0,0.0,
+1790953657.832,mode,off,0.00,0.00,0.0,0.0,"fwd=(0.0, 0.0, 1.0)"
+1790953658.025,spin,off,0.00,0.00,0.0,0.0,False

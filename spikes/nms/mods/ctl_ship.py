@@ -42,7 +42,7 @@ def _csv(name, header):
     return f, w
 
 
-class CtlShip2(Mod):
+class CtlShip(Mod):
     __author__ = "Constellation"
     __description__ = "Gate test 2: per-frame ship velocity override"
 
