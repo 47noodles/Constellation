@@ -1,7 +1,8 @@
-Found an already running instance of 'NMS.exe'
-Python injected
-Found PID: 66052
+Running from steam
+Found PID: 32240
 Exe hash is: d542309a7aae90d4fd0d273d3006abe789b0a844
 pyMHF injection on paused binary complete. Resuming exe.
+Press CTRL+C to exit the process:
+
 pyMHF interactive python command prompt
 Type any valid python commands to execute them within the games' process
