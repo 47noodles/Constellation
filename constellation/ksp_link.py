@@ -24,7 +24,7 @@ import math
 import socket
 
 from .orbits import Orbit, Vec, cross, dot, norm, unit
-from .universe import Universe
+from .universe import STAR, Universe
 
 KSP_ADDR = ("127.0.0.1", 47821)
 POOL = ["Moho", "Eve", "Kerbin", "Duna", "Dres", "Jool", "Eeloo"]
@@ -282,6 +282,7 @@ class KspLink:
         if not vs or "r" not in vs:
             return None
         names = {name: bid for bid, name in assignment(universe).items()}
+        names["Sun"] = STAR  # KSP's Sun is the coordinator's star
         bid = names.get(vs["body"])
         if bid is None:
             return {"body": None, "ksp_body": vs["body"], "ut": vs["ut"]}

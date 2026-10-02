@@ -141,9 +141,10 @@ class Coordinator:
         body_nms = self.universe.nms_pos(s["body"], t)
         body_vel = self.universe.nms_vel(s["body"], t)
         rate = 0.0 if self.clock.paused else self.clock.warp
+        body = self.universe.bodies.get(s["body"])  # None for the star
         return {"body": s["body"], "pos": [round(body_nms[k] + rel[k], 3) for k in range(3)],
                 "vel_per_real_s": [round((body_vel[k] + s["v"][k]) * rate, 3) for k in range(3)],
-                "alt_m": round(sum(c * c for c in rel) ** 0.5 - self.universe.bodies[s["body"]].radius, 1)}
+                "alt_m": round(sum(c * c for c in rel) ** 0.5 - (body.radius if body else 0.0), 1)}
 
     def status(self) -> dict:
         out = {"sys": self.sys_key, "game_t": round(self.clock.now(), 2), "warp": self.clock.warp,
