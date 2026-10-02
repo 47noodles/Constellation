@@ -107,6 +107,21 @@ namespace Constellation
                     foreach (PopupDialog pd in FindObjectsOfType<PopupDialog>()) { pd.Dismiss(); closed++; }
                     PopupDialog.ClearPopUps();
                     return "{\"ok\":true,\"dismissed\":" + closed + "}";
+                case "setut":
+                    Planetarium.SetUniversalTime(D(w[1]));
+                    return "{\"ok\":true,\"ut\":" + N(Planetarium.GetUniversalTime()) + "}";
+                case "setgm":
+                    return SetGm(Body(w[1]), D(w[2]));
+                case "setbody":
+                    // setbody <name> <radius> <gm> <sma> <ecc> <inc_deg> <lan_deg> <argpe_deg> <mep_rad> <epoch>
+                    return SetBody(Body(w[1]), D(w[2]), D(w[3]), D(w[4]), D(w[5]), D(w[6]), D(w[7]), D(w[8]), D(w[9]), D(w[10]));
+                case "parkmoons":
+                    return ParkMoons();
+                case "setvessel":
+                    // setvessel <body> <altitude_m>: circular equatorial orbit for the active vessel (must be on rails)
+                    return SetVessel(Body(w[1]), D(w[2]));
+                case "positions":
+                    return Positions();
                 case "ui":
                     return Ui(w.Length > 1 ? w[1] : "find", w.Length > 2 ? w[2] : "");
                 case "shot":
@@ -163,6 +178,110 @@ namespace Constellation
             RecomputeSoi(b);
             int touched = ReinitOrbitsAround(b, ut);
             return "{\"ok\":true,\"body\":" + BodyJson(b) + ",\"orbits_reinit\":" + touched + "}";
+        }
+
+        // ---- system sync (the coordinator's universe pushed into KSP's body pool) ----
+        private static string SetGm(CelestialBody b, double gm)
+        {
+            double scale = gm / b.gravParameter;
+            b.gravParameter = gm;
+            b.Mass *= scale;
+            b.gMagnitudeAtCenter = gm;
+            b.GeeASL = gm / (b.Radius * b.Radius) / 9.80665;
+            RecomputeSoi(b);
+            double ut = Planetarium.GetUniversalTime();
+            foreach (CelestialBody child in FlightGlobals.Bodies)
+            {
+                if (child == b || child.referenceBody != b || child.orbit == null) continue;
+                child.orbit.Init();
+                child.orbit.UpdateFromUT(ut);
+                RecomputeSoi(child);
+            }
+            ReinitOrbitsAround(b, ut);
+            return "{\"ok\":true,\"body\":" + BodyJson(b) + "}";
+        }
+
+        private static string SetBody(CelestialBody b, double radius, double gm, double sma, double ecc,
+                                      double incDeg, double lanDeg, double argPeDeg, double mEp, double epoch)
+        {
+            if (b.orbit == null) throw new InvalidOperationException(b.bodyName + " has no orbit");
+            double ut = Planetarium.GetUniversalTime();
+            double rScale = radius / b.Radius;
+            b.Radius = radius;
+            b.gravParameter = gm;
+            b.gMagnitudeAtCenter = gm;
+            b.Mass = gm / 6.674e-11;
+            b.GeeASL = gm / (radius * radius) / 9.80665;
+            if (b.scaledBody != null) b.scaledBody.transform.localScale *= (float)rScale;
+            b.orbit.SetOrbit(incDeg, ecc, sma, lanDeg, argPeDeg, mEp, epoch, b.referenceBody);
+            b.orbit.Init();
+            b.orbit.UpdateFromUT(ut);
+            RecomputeSoi(b);
+            int touched = ReinitOrbitsAround(b, ut);
+            return "{\"ok\":true,\"body\":" + BodyJson(b) + ",\"orbits_reinit\":" + touched + "}";
+        }
+
+        // Moons of the stock system are not part of the coordinator's universe yet: make them
+        // tiny and put them well inside their parent's (new) sphere of influence so the
+        // hierarchy stays valid. A vessel orbiting a moon must be moved off it first.
+        private static string ParkMoons()
+        {
+            double ut = Planetarium.GetUniversalTime();
+            var parked = new List<string>();
+            foreach (CelestialBody m in FlightGlobals.Bodies)
+            {
+                CelestialBody p = m.referenceBody;
+                if (m.orbit == null || p == null || p == m || p.referenceBody == null || p.referenceBody == p) continue;
+                double rScale = 1000.0 / m.Radius;
+                m.Radius = 1000.0;
+                m.gravParameter = 1e3;
+                m.gMagnitudeAtCenter = 1e3;
+                m.Mass = 1e3 / 6.674e-11;
+                if (m.scaledBody != null) m.scaledBody.transform.localScale *= (float)rScale;
+                Orbit o = m.orbit;
+                double sma = Math.Max(p.Radius * 3.0, p.sphereOfInfluence * 0.3);
+                o.SetOrbit(o.inclination, 0.0, sma, o.LAN, o.argumentOfPeriapsis, o.meanAnomalyAtEpoch, o.epoch, p);
+                o.Init();
+                o.UpdateFromUT(ut);
+                RecomputeSoi(m);
+                parked.Add(m.bodyName);
+            }
+            var sb = new StringBuilder("{\"ok\":true,\"parked\":[");
+            for (int i = 0; i < parked.Count; i++) { if (i > 0) sb.Append(','); sb.Append(Q(parked[i])); }
+            return sb.Append("]}").ToString();
+        }
+
+        private static string SetVessel(CelestialBody b, double altitude)
+        {
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null) throw new InvalidOperationException("no active vessel");
+            if (!v.packed) throw new InvalidOperationException("vessel is not on rails: time-warp first");
+            double ut = Planetarium.GetUniversalTime();
+            v.orbit.SetOrbit(0.0, 0.0, b.Radius + altitude, 0.0, 0.0, 0.0, ut, b);
+            v.orbit.Init();
+            v.orbit.UpdateFromUT(ut);
+            if (v.orbitDriver != null) v.orbitDriver.updateMode = OrbitDriver.UpdateMode.UPDATE;
+            if (v.patchedConicSolver != null) v.patchedConicSolver.Update();
+            return "{\"ok\":true,\"vessel\":" + VesselJson(v) + "}";
+        }
+
+        // Body positions relative to the Sun at the current UT, in KSP world axes. Only
+        // distances between bodies are compared with the coordinator (frame independent).
+        private static string Positions()
+        {
+            double ut = Planetarium.GetUniversalTime();
+            CelestialBody sun = FlightGlobals.Bodies[0];
+            Vector3d s = sun.getTruePositionAtUT(ut);
+            var sb = new StringBuilder("{\"ut\":" + N(ut) + ",\"bodies\":{");
+            bool first = true;
+            foreach (CelestialBody b in FlightGlobals.Bodies)
+            {
+                Vector3d p = b.getTruePositionAtUT(ut) - s;
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append(Q(b.bodyName)).Append(":[").Append(N(p.x)).Append(',').Append(N(p.y)).Append(',').Append(N(p.z)).Append(']');
+            }
+            return sb.Append("}}").ToString();
         }
 
         // "ui find <substring>": active objects under any canvas whose name contains it.
