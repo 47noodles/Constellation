@@ -15,6 +15,7 @@ game time, and every few seconds it measures KSP's planet error.
 Control (UDP, port CTL_PORT), one JSON message per datagram:
     {"t": "warp", "warp": 100}   {"t": "pause"}   {"t": "resume"}   {"t": "status"}
     {"t": "map", "on": true}     (KSP's real map view, with --ksp)
+    {"t": "burn", "prograde": 50, "normal": 0, "radial": 0}   (m/s on KSP's vessel, with --ksp)
 "status" is answered with the current status object.
 """
 
@@ -189,6 +190,12 @@ class Coordinator:
                     self.clock.pause()
                 elif kind == "resume":
                     self.clock.resume()
+                elif kind == "burn" and self.ksp is not None:
+                    reply = self.ksp.request("burn {!r} {!r} {!r}".format(
+                        float(msg.get("prograde", 0)), float(msg.get("normal", 0)), float(msg.get("radial", 0))))
+                    self.ship = None  # re-read the vessel next tick
+                    self.sock_ctl.sendto(protocol.encode(reply or {"error": "no reply from KSP"}), addr)
+                    continue
                 elif kind == "map" and self.ksp is not None:
                     self.ksp.request("map on" if msg.get("on", True) else "map off")
                 reply = self.status()

@@ -127,6 +127,9 @@ namespace Constellation
                     return SetVessel(Body(w[1]), D(w[2]));
                 case "positions":
                     return Positions();
+                case "burn":
+                    // burn <prograde> <normal> <radial>  (m/s, instantaneous, vessel must be on rails)
+                    return Burn(D(w[1]), D(w[2]), D(w[3]));
                 case "orbitpos":
                     return OrbitPositions();
                 case "vesselstate":
@@ -337,6 +340,28 @@ namespace Constellation
             v.orbit.UpdateFromStateVectors(r, vel, b, ut);
             v.orbit.Init();
             v.orbit.UpdateFromUT(ut);
+            if (v.patchedConicSolver != null) v.patchedConicSolver.Update();
+            return "{\"ok\":true,\"ut\":" + N(ut) + ",\"vessel\":" + VesselJson(v) + "}";
+        }
+
+        // An instantaneous velocity change in the vessel's own orbital directions. Those
+        // directions are built from the orbit itself, so no frame conversion is involved.
+        private static string Burn(double prograde, double normal, double radial)
+        {
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null) throw new InvalidOperationException("no active vessel");
+            if (!v.packed) throw new InvalidOperationException("vessel is not on rails: time-warp first");
+            double ut = Planetarium.GetUniversalTime();
+            Orbit o = v.orbit;
+            Vector3d r = o.getRelativePositionAtUT(ut);
+            Vector3d vel = o.getOrbitalVelocityAtUT(ut);
+            Vector3d pro = vel.normalized;
+            Vector3d nrm = Vector3d.Cross(r, vel).normalized;
+            Vector3d rad = Vector3d.Cross(nrm, pro).normalized;
+            Vector3d dv = pro * prograde + nrm * normal + rad * radial;
+            o.UpdateFromStateVectors(r, vel + dv, o.referenceBody, ut);
+            o.Init();
+            o.UpdateFromUT(ut);
             if (v.patchedConicSolver != null) v.patchedConicSolver.Update();
             return "{\"ok\":true,\"ut\":" + N(ut) + ",\"vessel\":" + VesselJson(v) + "}";
         }

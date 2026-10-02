@@ -242,7 +242,7 @@ class KspLink:
     # Replies carry no request id, and replies to fired "setut"s can still be in
     # flight, so each request only accepts a reply with the key its command returns.
     REPLY_KEY = {"orbitpos": "bodies", "positions": "bodies", "setbody": "body", "setgm": "body",
-                 "parkmoons": "parked", "map": "map", "info": "bodies", "vesselstate": "r", "setut": "ut"}
+                 "parkmoons": "parked", "map": "map", "info": "bodies", "vesselstate": "r", "setut": "ut", "burn": "vessel"}
 
     def request(self, cmd: str, timeout: float = 2.0) -> dict | None:
         import time
