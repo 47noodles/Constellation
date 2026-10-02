@@ -89,6 +89,8 @@ def sync_commands(universe: Universe, game_t: float) -> list[str]:
     for k, name in enumerate(n for n in POOL if n not in used.values()):
         cmds.append(f"setbody {name} 1000.0 1000.0 {PARK_SMA * (1 + k)!r} 0.0 0.0 0.0 0.0 0.0 0.0")
     cmds.append("parkmoons")
+    # Not "norotframe": zeroing inverseRotThresholdAltitude did not stop the reporting
+    # frame turning (3 Oct 2026) and appeared to drop the vessel off rails.
     return cmds
 
 
@@ -115,9 +117,103 @@ def check(universe: Universe) -> dict:
     return {"ut": t, "worst_m": round(worst, 3), "pairs_km": rows, "ksp_dist_from_sun_km": sun_d}
 
 
+def check_inertial(universe: Universe) -> dict:
+    """Full-vector check in KSP's inertial orbit frame (z-up): positions, not just distances."""
+    pos = send("orbitpos")
+    t = pos["ut"]
+    worst, rows = 0.0, {}
+    for bid, name in assignment(universe).items():
+        want = zup(universe.orbit_pos(bid, t))
+        got = pos["bodies"][name]
+        err = norm(tuple(a - b for a, b in zip(want, got)))
+        worst = max(worst, err)
+        rows[bid] = {"ksp": name, "err_m": round(err, 3)}
+    return {"ut": t, "worst_m": round(worst, 3), "bodies": rows}
+
+
+def frame_offset(universe: Universe, orbitpos: dict) -> tuple[float, float]:
+    """Rotation about z (radians) from coordinator z-up axes to KSP's reporting frame.
+
+    KSP reports orbit positions in a frame that turns over time (its inverse
+    rotation near planets), so the offset is measured from the planets, whose
+    true positions the coordinator knows, at the moment of every query.
+    Returns (offset, spread): spread is the largest disagreement between
+    planets, which should be ~0 when the sync is right.
+    """
+    t = orbitpos["ut"]
+    angles = []
+    for bid, name in assignment(universe).items():
+        c = zup(universe.orbit_pos(bid, t))
+        k = orbitpos["bodies"][name]
+        angles.append(math.atan2(k[1], k[0]) - math.atan2(c[1], c[0]))
+    ref = angles[0]
+    wrapped = [ref + math.remainder(a - ref, 2 * math.pi) for a in angles]
+    mean = sum(wrapped) / len(wrapped)
+    return mean, max(abs(a - mean) for a in wrapped)
+
+
+def rot_z(v: Vec, angle: float) -> Vec:
+    c, s = math.cos(angle), math.sin(angle)
+    return (c * v[0] - s * v[1], s * v[0] + c * v[1], v[2])
+
+
+def vessel_roundtrip(universe: Universe, body_id: str, r_coord: Vec, v_coord: Vec, wait_s: float) -> dict:
+    """Put KSP's vessel on a coordinator state, let KSP fly it, and compare.
+
+    The coordinator propagates the same state with its own Kepler code; the
+    difference after ``wait_s`` real seconds is the pipeline error.
+    """
+    import time
+
+    from .orbits import from_state
+
+    name = assignment(universe)[body_id]
+    pos = send("orbitpos")
+    off, spread = frame_offset(universe, pos)
+    r_k, v_k = rot_z(zup(r_coord), off), rot_z(zup(v_coord), off)
+    set_reply = send(
+        "vesselstate set {} {!r} {!r} {!r} {!r} {!r} {!r}".format(name, *r_k, *v_k))
+    t0 = set_reply.get("ut") or send("orbitpos")["ut"]  # exact UT the state was applied at
+    orbit = from_state(universe.bodies[body_id].mu, zup(r_coord), zup(v_coord), t0)
+    time.sleep(wait_s)
+    vs = send("vesselstate")
+    off2, spread2 = frame_offset(universe, vs["orbitpos"])  # planets read in the same frame as the vessel
+    # vesselstate and orbitpos are read a frame apart; use the vessel's own UT
+    r_back = rot_z(tuple(vs["r"]), -off2)
+    want = orbit.position_at(vs["ut"])
+    return {
+        "body": name, "set": set_reply.get("vessel", set_reply), "flown_game_s": round(vs["ut"] - t0, 2),
+        "frame_offset_deg": [round(math.degrees(off), 3), round(math.degrees(off2), 3)],
+        "frame_spread_m_equiv_deg": [round(math.degrees(spread), 6), round(math.degrees(spread2), 6)],
+        "error_m": round(norm(tuple(a - b for a, b in zip(r_back, want))), 3),
+        "radius_km": round(norm(want) / 1000, 3),
+    }
+
+
+def bring_up(universe: Universe, game_t: float, wait_s: float = 600.0) -> None:
+    """After KSP auto-loads the spike save: clear the popup, go on rails, sync."""
+    import time
+
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            send("info", timeout=2.0)
+            break
+        except (OSError, ValueError):
+            if time.monotonic() > deadline:
+                raise TimeoutError("KSP bridge never answered")
+            time.sleep(3.0)
+    print("ui", send("ui hide whatsNew"))
+    print("warp", send("warp 2"))
+    time.sleep(3.0)
+    for cmd in sync_commands(universe, game_t):
+        reply = send(cmd)
+        print(cmd.split()[0], cmd.split()[1] if len(cmd.split()) > 1 else "", "->", "ok" if reply.get("ok") else reply)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("action", choices=["sync", "check", "commands"])
+    ap.add_argument("action", choices=["sync", "check", "check-inertial", "commands", "bringup"])
     ap.add_argument("planets")
     ap.add_argument("--game-t", type=float, default=0.0)
     args = ap.parse_args()
@@ -130,6 +226,10 @@ def main() -> None:
             reply = send(cmd)
             print(cmd.split()[0], cmd.split()[1] if len(cmd.split()) > 1 else "", "->",
                   "ok" if reply.get("ok") else reply)
+    elif args.action == "bringup":
+        bring_up(universe, args.game_t)
+    elif args.action == "check-inertial":
+        print(json.dumps(check_inertial(universe), indent=1))
     else:
         print(json.dumps(check(universe), indent=1))
 

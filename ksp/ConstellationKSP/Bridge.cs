@@ -117,11 +117,24 @@ namespace Constellation
                     return SetBody(Body(w[1]), D(w[2]), D(w[3]), D(w[4]), D(w[5]), D(w[6]), D(w[7]), D(w[8]), D(w[9]), D(w[10]));
                 case "parkmoons":
                     return ParkMoons();
+                case "norotframe":
+                    // Turn off KSP's inverse rotation (the reporting frame turning with a planet)
+                    // so orbit positions stay in one fixed inertial frame.
+                    foreach (CelestialBody cb in FlightGlobals.Bodies) cb.inverseRotThresholdAltitude = 0f;
+                    return "{\"ok\":true}";
                 case "setvessel":
                     // setvessel <body> <altitude_m>: circular equatorial orbit for the active vessel (must be on rails)
                     return SetVessel(Body(w[1]), D(w[2]));
                 case "positions":
                     return Positions();
+                case "orbitpos":
+                    return OrbitPositions();
+                case "vesselstate":
+                    // vesselstate                                    -> vessel r, v relative to its body (inertial z-up)
+                    // vesselstate set <body> rx ry rz vx vy vz        -> put the vessel on that state (must be on rails)
+                    return w.Length > 1 && w[1] == "set"
+                        ? SetVesselState(Body(w[2]), new Vector3d(D(w[3]), D(w[4]), D(w[5])), new Vector3d(D(w[6]), D(w[7]), D(w[8])))
+                        : VesselState();
                 case "ui":
                     return Ui(w.Length > 1 ? w[1] : "find", w.Length > 2 ? w[2] : "");
                 case "shot":
@@ -282,6 +295,50 @@ namespace Constellation
                 sb.Append(Q(b.bodyName)).Append(":[").Append(N(p.x)).Append(',').Append(N(p.y)).Append(',').Append(N(p.z)).Append(']');
             }
             return sb.Append("}}").ToString();
+        }
+
+        // Every body's position relative to its parent in KSP's inertial orbit frame (z-up),
+        // the frame Orbit.SetOrbit's elements are defined in: directly comparable with the
+        // coordinator's zup() positions.
+        private static string OrbitPositions()
+        {
+            double ut = Planetarium.GetUniversalTime();
+            var sb = new StringBuilder("{\"ut\":" + N(ut) + ",\"bodies\":{");
+            bool first = true;
+            foreach (CelestialBody b in FlightGlobals.Bodies)
+            {
+                if (b.orbit == null) continue;
+                Vector3d p = b.orbit.getRelativePositionAtUT(ut);
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append(Q(b.bodyName)).Append(":[").Append(N(p.x)).Append(',').Append(N(p.y)).Append(',').Append(N(p.z)).Append(']');
+            }
+            return sb.Append("}}").ToString();
+        }
+
+        private static string VesselState()
+        {
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null) throw new InvalidOperationException("no active vessel");
+            double ut = Planetarium.GetUniversalTime();
+            Vector3d r = v.orbit.getRelativePositionAtUT(ut);
+            Vector3d vel = v.orbit.getOrbitalVelocityAtUT(ut);
+            return "{\"ut\":" + N(ut) + ",\"body\":" + Q(v.orbit.referenceBody.bodyName) + ",\"r\":[" + N(r.x) + "," + N(r.y) + "," + N(r.z)
+                + "],\"v\":[" + N(vel.x) + "," + N(vel.y) + "," + N(vel.z) + "],\"packed\":" + (v.packed ? "true" : "false")
+                + ",\"orbitpos\":" + OrbitPositions() + "}"; // same frame, same UT: lets the caller remove KSP's frame rotation
+        }
+
+        private static string SetVesselState(CelestialBody b, Vector3d r, Vector3d vel)
+        {
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null) throw new InvalidOperationException("no active vessel");
+            if (!v.packed) throw new InvalidOperationException("vessel is not on rails: time-warp first");
+            double ut = Planetarium.GetUniversalTime();
+            v.orbit.UpdateFromStateVectors(r, vel, b, ut);
+            v.orbit.Init();
+            v.orbit.UpdateFromUT(ut);
+            if (v.patchedConicSolver != null) v.patchedConicSolver.Update();
+            return "{\"ok\":true,\"ut\":" + N(ut) + ",\"vessel\":" + VesselJson(v) + "}";
         }
 
         // "ui find <substring>": active objects under any canvas whose name contains it.
