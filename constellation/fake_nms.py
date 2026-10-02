@@ -49,7 +49,12 @@ def main() -> None:
         out.sendto(protocol.encode(state), (protocol.HOST, protocol.NMS_STATE_PORT))
         if seq % 300 == 0:
             moved = {s: round(math.dist(p["pos"], p["home"]) / 1000) for s, p in planets.items()}
-            print(f"seq {seq} applied {applied} km from home {moved}", flush=True)
+            ship = msg.get("ship") if msg else None
+            ship_txt = ""
+            if ship:
+                centre = planets[int(ship["body"][1:])]["pos"]
+                ship_txt = f" ship around {ship['body']} at {math.dist(ship['pos'], centre) / 1000:.1f} km from its centre (alt {ship['alt_m'] / 1000:.1f} km)"
+            print(f"seq {seq} applied {applied} km from home {moved}{ship_txt}", flush=True)
         time.sleep(1 / 30)
 
 

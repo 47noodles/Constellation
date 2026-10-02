@@ -18,6 +18,8 @@ coordinator -> NMS adapter (port NMS_CMD_PORT):
     Absolute NMS positions at send time, plus velocity per real second (warp
     already applied) so the adapter can extrapolate between messages. The
     adapter ignores targets for another "sys".
+    Optional "ship": {"body": id, "pos": [x, y, z], "vel_per_real_s": [...],
+    "alt_m": float}: where the ship KSP is flying should be drawn in NMS.
 """
 
 from __future__ import annotations

@@ -49,6 +49,8 @@ class Coordinator:
         self.ksp = KspLink() if ksp else None
         self.ksp_synced = False
         self.ksp_worst_m = None
+        self.ship: dict | None = None  # KSP vessel in coordinator axes, relative to its body
+        self.ship_read_at = 0.0
         self.sock_state = protocol.udp_socket(protocol.NMS_STATE_PORT)
         self.sock_cmd = protocol.udp_socket()
         self.sock_ctl = protocol.udp_socket(CTL_PORT)
@@ -104,15 +106,43 @@ class Coordinator:
             log.info("anchor -> %s at game_t=%.1f", self.universe.anchor, t)
         self.seq += 1
         rate = 0.0 if self.clock.paused else self.clock.warp
+        if self.ksp is not None and self.ksp_synced and self.seq % 6 == 0:
+            try:
+                ship = self.ksp.vessel(self.universe)
+                if ship is not None:
+                    self.ship, self.ship_read_at = ship, t
+            except Exception as e:  # noqa: BLE001
+                self.ksp.last_error = repr(e)
         targets, vels = {}, {}
         for b in self.universe.bodies.values():
             targets[str(b.slot)] = [round(c, 3) for c in self.universe.nms_pos(b.id, t)]
             vels[str(b.slot)] = [round(c * rate, 3) for c in self.universe.nms_vel(b.id, t)]
         msg = {"t": "nms_targets", "seq": self.seq, "sys": self.sys_key, "game_t": t, "warp": rate,
                "targets": targets, "vel_per_real_s": vels}
+        ship_nms = self._ship_nms(t)
+        if ship_nms is not None:
+            msg["ship"] = ship_nms
         self.sock_cmd.sendto(protocol.encode(msg), (protocol.HOST, protocol.NMS_CMD_PORT))
         if self.ksp is not None and self.ksp_synced:
             self.ksp.fire(f"setut {t!r}")  # KSP's clock is a slave of game time
+
+    def _ship_nms(self, t: float) -> dict | None:
+        """The KSP vessel's position for NMS: its body's NMS position plus its offset.
+
+        Between KSP reads the offset is advanced linearly with the vessel's
+        velocity (5 Hz reads; good to well under a metre at these speeds).
+        """
+        s = self.ship
+        if not s or s.get("body") is None or self.universe is None:
+            return None
+        dt = t - s["ut"]
+        rel = tuple(s["r"][k] + s["v"][k] * dt for k in range(3))
+        body_nms = self.universe.nms_pos(s["body"], t)
+        body_vel = self.universe.nms_vel(s["body"], t)
+        rate = 0.0 if self.clock.paused else self.clock.warp
+        return {"body": s["body"], "pos": [round(body_nms[k] + rel[k], 3) for k in range(3)],
+                "vel_per_real_s": [round((body_vel[k] + s["v"][k]) * rate, 3) for k in range(3)],
+                "alt_m": round(sum(c * c for c in rel) ** 0.5 - self.universe.bodies[s["body"]].radius, 1)}
 
     def status(self) -> dict:
         out = {"sys": self.sys_key, "game_t": round(self.clock.now(), 2), "warp": self.clock.warp,
@@ -121,6 +151,9 @@ class Coordinator:
         if self.ksp is not None:
             out["ksp"] = {"synced": self.ksp_synced, "worst_planet_error_m": self.ksp_worst_m,
                           "last_error": self.ksp.last_error}
+            ship = self._ship_nms(self.clock.now())
+            if ship is not None:
+                out["ship"] = ship
         if self.universe is not None:
             out["anchor"] = self.universe.anchor
             t = self.clock.now()

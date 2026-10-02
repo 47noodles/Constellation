@@ -270,6 +270,25 @@ class KspLink:
                 return False
         return True
 
+    def vessel(self, universe: Universe, timeout: float = 0.2) -> dict | None:
+        """KSP's active vessel in coordinator axes, relative to its body.
+
+        The vessel and the planets come back in one reply, in the same KSP
+        frame, so removing KSP's frame rotation is exact on this read path.
+        Returns {"body": coordinator body id, "r", "v", "ut"} or None.
+        """
+        vs = self.request("vesselstate", timeout=timeout)
+        if not vs or "r" not in vs:
+            return None
+        names = {name: bid for bid, name in assignment(universe).items()}
+        bid = names.get(vs["body"])
+        if bid is None:
+            return {"body": None, "ksp_body": vs["body"], "ut": vs["ut"]}
+        off, _ = frame_offset(universe, vs["orbitpos"])
+        r = zup(rot_z(tuple(vs["r"]), -off))  # zup() swaps y and z, so it is its own inverse
+        v = zup(rot_z(tuple(vs["v"]), -off))
+        return {"body": bid, "r": r, "v": v, "ut": vs["ut"]}
+
     def worst_error(self, universe: Universe) -> float | None:
         """Largest planet position error in KSP's frame after removing its rotation (m)."""
         pos = self.request("orbitpos")
