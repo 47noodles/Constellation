@@ -110,3 +110,14 @@ def plan_ship(ship: dict | None, mode: str, node_pos: Sequence[float] | None = N
     if node_pos is None:
         return ShipAction()
     return ShipAction(mode="orbit", delta=ship_shift(ship, node_pos, age))
+
+
+def override_relative_pos(target: Sequence[float], written_rel: Sequence[float],
+                          current_abs: Sequence[float]) -> Vec:
+    """New relative translation that puts a scene node at ``target`` absolute.
+
+    A node's absolute position is ``parent + written_rel`` for the relative
+    translation the engine is about to write, so the parent offset is
+    ``current_abs - written_rel``. Returning ``target - parent`` makes the
+    resulting absolute position ``target``."""
+    return _sub(target, _sub(current_abs, written_rel))
