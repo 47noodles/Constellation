@@ -33,6 +33,7 @@ the player's planet, so this should never trigger.
 Status through ctl_player's channel:  python spikes/nms/ctl.py adapter status
 """
 
+import sys
 import builtins
 import ctypes
 import importlib.util
@@ -61,6 +62,7 @@ def _load_transforms():
         if os.path.isfile(candidate):
             spec = importlib.util.spec_from_file_location("constellation_nms_transforms", candidate)
             module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
             spec.loader.exec_module(module)
             return module
         parent = os.path.dirname(here)
