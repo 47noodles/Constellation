@@ -121,3 +121,50 @@ def override_relative_pos(target: Sequence[float], written_rel: Sequence[float],
     ``current_abs - written_rel``. Returning ``target - parent`` makes the
     resulting absolute position ``target``."""
     return _sub(target, _sub(current_abs, written_rel))
+
+
+# ---- ship state report (finite-difference velocity, no GetVelocity) ----------
+
+VELOCITY_WINDOW = 5
+
+
+def smooth_velocity(samples: Sequence[tuple[float, Sequence[float]]],
+                    window: int = VELOCITY_WINDOW) -> Vec | None:
+    """Velocity in metres per REAL second from a history of ``(real_t, pos)``
+    samples, newest last.
+
+    A finite difference between the oldest and newest sample in the newest
+    ``window`` frames, so the result is the mean velocity across up to five
+    frames and immune to single-frame jitter. Returns ``None`` until two samples
+    with strictly increasing real time are available. This is the offline,
+    game-free replacement for the game's GetVelocity, which access-violates on
+    build 180383 and must never be called."""
+    if window < 2:
+        window = 2
+    pts = list(samples)[-window:]
+    if len(pts) < 2:
+        return None
+    (t0, p0), (t1, p1) = pts[0], pts[-1]
+    dt = t1 - t0
+    if dt <= 0.0:
+        return None
+    return ((p1[0] - p0[0]) / dt, (p1[1] - p0[1]) / dt, (p1[2] - p0[2]) / dt)
+
+
+def ship_sample(history: Sequence[tuple[float, Sequence[float]]], frame: int,
+                real_t: float, pos: Sequence[float]) -> dict:
+    """The adapter's ``"ship"`` report object for one sample.
+
+    ``history`` is the same ``(real_t, pos)`` history passed to
+    ``smooth_velocity``; ``pos`` is the current sample and ``real_t`` its
+    ``time.monotonic()``. Velocity falls back to zero before two samples exist.
+    Pure, so the exact wire JSON is offline-testable."""
+    vel = smooth_velocity(history)
+    if vel is None:
+        vel = (0.0, 0.0, 0.0)
+    return {
+        "pos": [round(pos[0], 3), round(pos[1], 3), round(pos[2], 3)],
+        "vel": [round(vel[0], 3), round(vel[1], 3), round(vel[2], 3)],
+        "frame": frame,
+        "real_t": real_t,
+    }
