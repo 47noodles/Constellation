@@ -1,4 +1,4 @@
-"""Constellation's No Man's Sky adapter (pyMHF mod, NMS build 180383).
+"""Constellation's No Man's Sky adapter, live NMS5 copy (pyMHF mod, NMS build 180383).
 
 Every rendered frame, on the game thread:
 1. take the coordinator's newest planet targets (UDP 127.0.0.1:47811) and move
@@ -84,7 +84,7 @@ def _v3(v):
     return [round(v.x, 3), round(v.y, 3), round(v.z, 3)]
 
 
-class ConstellationNMS4(Mod):
+class ConstellationNMS5(Mod):
     __author__ = "Constellation"
     __description__ = "Applies coordinator planet targets; reports player and planets"
 

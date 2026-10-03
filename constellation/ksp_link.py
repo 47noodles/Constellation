@@ -78,6 +78,18 @@ def add_node_cmd(node: ManeuverNode) -> str:
     return "addnode {!r} {!r} {!r} {!r}".format(node.ut, node.prograde, node.normal, node.radial)
 
 
+def setc_cmd(name: str, r: Vec, v: Vec, body_r: Vec, body_v: Vec, ut: float) -> str:
+    """The exact vesselstate setc line.
+
+    ``r``/``v`` are the vessel relative to the reference body ``name``;
+    ``body_r``/``body_v`` are that body relative to its parent; all four are in
+    coordinator axes and are converted to KSP's z-up frame here. The plugin
+    removes its own report-frame rotation from this same set at ``ut``.
+    """
+    return "vesselstate setc {} {}".format(
+        name, " ".join(repr(c) for c in (*zup(r), *zup(v), *zup(body_r), *zup(body_v), ut)))
+
+
 def assignment(universe: Universe) -> dict[str, str]:
     """Coordinator body id -> KSP pool body name, inner to outer."""
     ordered = sorted(universe.bodies.values(), key=lambda b: b.orbit.a)
