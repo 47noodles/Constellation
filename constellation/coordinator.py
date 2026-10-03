@@ -18,8 +18,16 @@ Two modes (docs/transfer-land-design.md section 6):
     "flight" powered flight near a body; the coordinator owns the state and
              integrates flight.py, while NMS poses the player/ship.
 
+Mirror mode copies the live NMS ship back into KSP: while it is on and the NMS
+adapter reports a fresh ship pose (real age < 0.5 s), the coordinator inverts
+the anchor transform and pushes the vessel to KSP with `vesselstate setc` at no
+more than 5 Hz. It starts on with `--ksp`; plan_transfer/add_node/execute_node/
+land/launch take it off for the duration of coordinator-owned control, and
+handback to orbit restores it.
+
 Control (UDP, port CTL_PORT), one JSON message per datagram:
     {"t": "warp", "warp": 100}   {"t": "pause"}   {"t": "resume"}   {"t": "status"}
+    {"t": "mirror", "on": true}  (copy the NMS ship into KSP; default on with --ksp)
     {"t": "map", "on": true}     (KSP's real map view, with --ksp)
     {"t": "burn", "prograde": 50, "normal": 0, "radial": 0}   (m/s on KSP's vessel, with --ksp)
     {"t": "plan_transfer", "from": "p1", "to": "p2", "t0": 0, "span": 1e7, "search": false}
@@ -42,9 +50,9 @@ import time
 
 from . import flight, maneuver, patched, protocol
 from .clock import Clock
-from .ksp_link import KspLink, assignment, zup
+from .ksp_link import KspLink, assignment, setc_cmd, zup
 from .maneuver import ManeuverNode
-from .orbits import norm
+from .orbits import norm, sub
 from .patched import VesselState
 from .universe import STAR, Universe
 
@@ -57,6 +65,12 @@ FLIGHT_ENTER_ALT_M = 40_000.0
 FLIGHT_EXIT_ALT_M = 45_000.0
 # Game seconds integrated per coordinator tick while in powered flight.
 FLIGHT_DT = 0.25
+
+# Mirror mode: copy the NMS ship's pose into KSP while the coordinator is not
+# flying it. A ship report older than this many real seconds is ignored, and
+# pushes are capped at this rate.
+MIRROR_MAX_AGE_S = 0.5
+MIRROR_PUSH_HZ = 5.0
 
 # A general-purpose lander/ascent stage. Bodies are small (tens of km to a few
 # hundred km) with roughly Earth surface gravity, so this has a comfortable
@@ -96,6 +110,12 @@ class Coordinator:
         self.target_alt_m = 0.0
         self.flight_pose: tuple | None = None
         self.last_landing_speed: float | None = None
+        # ---- mirror mode: NMS ship -> KSP (see docs/transfer-land-design.md) --
+        self.mirror_on = bool(ksp)  # on by default when started with --ksp
+        self.mirror_pushes = 0
+        self.mirror_last_push_at: float | None = None
+        self.mirror_ship_alt_m: float | None = None
+        self._mirror_before_pause: bool | None = None
         # ---- maneuver nodes ---------------------------------------------------
         self.nodes: list[ManeuverNode] = []
         self.pending_exec: int | None = None
@@ -176,6 +196,7 @@ class Coordinator:
         self.sock_cmd.sendto(protocol.encode(msg), (protocol.HOST, protocol.NMS_CMD_PORT))
         if self.ksp is not None and self.ksp_synced:
             self.ksp.fire(f"setut {t!r}")  # KSP's clock is a slave of game time
+        self._mirror_step(time.monotonic())
 
     def _read_vessel(self, t: float) -> None:
         if self.ksp is None or not self.ksp_synced or self.seq % 6 != 0:
@@ -272,14 +293,14 @@ class Coordinator:
         self.guidance = None
         self.flight_state = None
         self.flight_pose = None
+        if self._mirror_before_pause:
+            self.mirror_on = True
+            self._mirror_before_pause = None
 
     def _write_vessel_to_ksp(self, body: str, r, v, ut: float) -> None:
         name = assignment(self.universe)[body]
         body_r, body_v = self.universe.bodies[body].orbit.state_at(ut)
-        br, bv = zup(body_r), zup(body_v)
-        cmd = "vesselstate setc {} {}".format(
-            name, " ".join(repr(c) for c in (*zup(r), *zup(v), *br, *bv, ut)))
-        self.ksp.request(cmd)
+        self.ksp.request(setc_cmd(name, r, v, body_r, body_v, ut))
 
     def _maybe_enter_flight(self) -> None:
         """Below the threshold, switch from rails to powered flight (section 6)."""
@@ -322,6 +343,7 @@ class Coordinator:
                 "dv_arrive": tr.dv_arrive, "c3": tr.c3}
 
     def _ctl_plan_transfer(self, msg: dict) -> dict:
+        self._mirror_pause()
         if self.universe is None:
             return {"t": "plan_transfer", "error": "no universe"}
         from_id, to_id = msg["from"], msg["to"]
@@ -336,6 +358,7 @@ class Coordinator:
         return {"t": "plan_transfer", "transfer": self._transfer_dict(tr)}
 
     def _ctl_add_node(self, msg: dict) -> dict:
+        self._mirror_pause()
         node = ManeuverNode(ut=float(msg["ut"]), prograde=float(msg.get("prograde", 0.0)),
                             normal=float(msg.get("normal", 0.0)),
                             radial=float(msg.get("radial", 0.0)))
@@ -347,6 +370,7 @@ class Coordinator:
         return {"t": "add_node", "node": reply}
 
     def _ctl_execute_node(self, msg: dict) -> dict:
+        self._mirror_pause()
         index = int(msg.get("index", 0))
         if index < 0 or index >= len(self.nodes):
             return {"t": "execute_node", "ok": False, "error": "no such node"}
@@ -381,6 +405,7 @@ class Coordinator:
         self._skip_vessel_read = 2  # do not let a stale KSP read undo the burn
 
     def _ctl_land(self, msg: dict) -> dict:
+        self._mirror_pause()
         if self.universe is None:
             return {"t": "land", "ok": False, "error": "no universe"}
         body = msg["body"]
@@ -407,6 +432,7 @@ class Coordinator:
         return {"t": "land", "ok": True, "mode": "flight"}
 
     def _ctl_launch(self, msg: dict) -> dict:
+        self._mirror_pause()
         if self.universe is None:
             return {"t": "launch", "ok": False, "error": "no universe"}
         body = msg["body"]
@@ -452,6 +478,75 @@ class Coordinator:
                 "vel_per_real_s": [round((body_vel[k] + s["v"][k]) * rate, 3) for k in range(3)],
                 "alt_m": round(sum(c * c for c in rel) ** 0.5 - (body.radius if body else 0.0), 1)}
 
+    # ---- mirror: copy the NMS ship's pose into KSP ---------------------------
+    def _ship_report(self) -> dict | None:
+        """The optional "ship" key from the adapter's newest state report.
+
+        {"pos": [x,y,z] NMS absolute metres, "vel": [vx,vy,vz] metres per REAL
+        second, "frame": adapter frame, "real_t": time.monotonic() at sample}.
+        """
+        if self.last_state is None:
+            return None
+        ship = self.last_state.get("ship")
+        if not isinstance(ship, dict) or "pos" not in ship:
+            return None
+        return ship
+
+    def _mirror_relative(self, report: dict, now_real: float) -> tuple:
+        """Ship report -> (anchor-relative r, v, age in real seconds).
+
+        This is the exact inverse of ``Universe.nms_pos``: the anchor body is
+        pinned at ``universe.anchor_nms`` and the two spaces share the
+        coordinator's axes, so a ship at NMS ``pos`` is at ``pos - anchor_nms``
+        relative to the anchor body centre. The adapter's velocity is per real
+        second, so game velocity is that divided by the warp (1 real s = warp
+        game s). The anchor's own orbital velocity is not added here: ``setc``
+        carries it separately as the body's state relative to its parent.
+        """
+        warp = self.clock.warp if self.clock.warp > 0.0 else 1.0
+        r = sub(tuple(float(c) for c in report["pos"]), self.universe.anchor_nms)
+        v = tuple(float(c) / warp for c in report.get("vel", (0.0, 0.0, 0.0)))
+        age = now_real - float(report.get("real_t", 0.0))
+        return r, v, age
+
+    def _mirror_push(self, r, v) -> None:
+        """Send one setc state putting KSP's active vessel at the mirrored pose."""
+        u = self.universe
+        ut = self.clock.now()
+        if u.anchor == STAR:
+            name, body_r, body_v = "Sun", (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+        else:
+            name = assignment(u)[u.anchor]
+            body_r, body_v = u.bodies[u.anchor].orbit.state_at(ut)
+        self.ksp.fire(setc_cmd(name, r, v, body_r, body_v, ut))
+        self.mirror_pushes += 1
+        self.mirror_ship_alt_m = norm(r) - (u.bodies[u.anchor].radius if u.anchor in u.bodies else 0.0)
+
+    def _mirror_step(self, now_real: float) -> None:
+        """Push a fresh ship report to KSP at no more than MIRROR_PUSH_HZ."""
+        if not self.mirror_on or self.ksp is None or not self.ksp_synced:
+            return
+        if self.mode != "orbit" or self.universe is None:
+            return
+        report = self._ship_report()
+        if report is None:
+            return
+        r, v, age = self._mirror_relative(report, now_real)
+        if age < 0.0 or age >= MIRROR_MAX_AGE_S:
+            return
+        if (self.mirror_last_push_at is not None
+                and now_real - self.mirror_last_push_at < 1.0 / MIRROR_PUSH_HZ):
+            return
+        self._mirror_push(r, v)
+        self.mirror_last_push_at = now_real
+
+    def _mirror_pause(self) -> None:
+        """A coordinator-owned command takes the ship off the mirror; handback
+        to orbit puts it back if it was on."""
+        if self.mirror_on:
+            self._mirror_before_pause = True
+            self.mirror_on = False
+
     def status(self) -> dict:
         out = {"sys": self.sys_key, "game_t": round(self.clock.now(), 2), "warp": self.clock.warp,
                "paused": self.clock.paused, "seq": self.seq, "anchor_changes": self.anchor_changes,
@@ -494,6 +589,13 @@ class Coordinator:
                 out["target_minus_reported_m"] = errs
                 out["player"] = self.last_state["player"]
                 out["nms_frame_ms"] = self.last_state.get("frame_ms")
+        out["mirror"] = {
+            "on": self.mirror_on,
+            "last_push_age_s": round(time.monotonic() - self.mirror_last_push_at, 2)
+            if self.mirror_last_push_at is not None else None,
+            "ship_alt_m": round(self.mirror_ship_alt_m, 1) if self.mirror_ship_alt_m is not None else None,
+            "pushes": self.mirror_pushes,
+        }
         return out
 
     # ---- control port --------------------------------------------------------
@@ -506,6 +608,11 @@ class Coordinator:
             self.clock.pause()
         elif kind == "resume":
             self.clock.resume()
+        elif kind == "mirror":
+            self.mirror_on = bool(msg.get("on", True))
+            if self.mirror_on:
+                self._mirror_before_pause = None
+            return self.status()
         elif kind == "plan_transfer":
             return self._ctl_plan_transfer(msg)
         elif kind == "add_node":

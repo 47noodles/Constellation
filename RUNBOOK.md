@@ -68,7 +68,39 @@ Typical live run (step 4 above with `--ksp`):
    reaching it the coordinator writes the circular state back to KSP with
    `vesselstate setc` and returns to `mode:"orbit"`.
 
-## Not yet verified without a live KSP and NMS
+## Mirror your NMS ship into KSP
+
+When the coordinator runs with `--ksp`, mirror mode is **on** by default. While
+it is on, the NMS adapter tells the coordinator where your ship is (its absolute
+NMS position, and its velocity in metres per real second), and the coordinator
+copies that pose into KSP's active vessel at up to 5 times a second — so a ship
+you fly in NMS shows up flying in KSP's map.
+
+How it works: the coordinator already places every body in NMS space by pinning
+the *anchor* body (the one you are in) where NMS has it and drawing the orbit
+offsets around it. Mirroring is the exact inverse of that: the ship's NMS
+position minus the anchor's NMS position is the ship's offset from the anchor
+body centre in the coordinator's own axes. Its velocity, reported per real
+second, is divided by the coordinator's warp (1 real second = `warp` game
+seconds) to become a game-time velocity. The coordinator then pushes that state
+to KSP with the same `vesselstate setc` command it uses for any exact state set,
+which also carries the anchor body's own orbit velocity. A ship report older
+than 0.5 s is ignored, so a stalled NMS never drags KSP around.
+
+Toggle it from the control CLI:
+
+    python tools/cctl.py mirror on
+    python tools/cctl.py mirror off
+
+`python tools/cctl.py status` shows the `mirror` block: whether it is `on`, the
+age in seconds of the last push (`last_push_age_s`), the ship's altitude above
+the anchor body (`ship_alt_m`) and how many pushes have been sent (`pushes`).
+
+`plan_transfer`, `add_node`, `execute_node`, `land` and `launch` all turn mirror
+off, because from then on the coordinator owns the vessel; handing the vessel
+back to orbit after a launch turns it on again. Turn it on by hand any time.
+
+
 
 The offline suite (`tests/test_scenario.py`) exercises the whole flow through
 fake endpoints and the real orbit/patched/flight modules. These still need a
@@ -81,6 +113,10 @@ live run:
   is not).
 * NMS adapter `mode:"flight"`: `cGcPlayer.SetToPosition` posing the player and
   the `pose.forward` facing; the proven `GetVelocity` ban still holds.
+* The NMS adapter's `ship` state report (absolute `pos`, finite-difference
+  `vel` over the last 5 frames, `real_t`) that mirror mode consumes: the
+  coordinator side is in and tested, but the adapter build in this tree does not
+  emit it yet.
 * Surface height: the terrain callback defaults to flat (`body.radius`); the
   NMS-authoritative surface approximation from `research nms-control.md` is not
   wired in.

@@ -7,10 +7,19 @@ harmless: each message carries complete state, never a delta.
 NMS adapter -> coordinator (port NMS_STATE_PORT):
     {"t": "nms_state", "seq": int, "sys": str, "frame_ms": float,
      "player": [x, y, z], "applied_game_t": float | null,
-     "planets": [{"slot": int, "pos": [x, y, z], "home": [x, y, z]}]}
+     "planets": [{"slot": int, "pos": [x, y, z], "home": [x, y, z]}],
+     "ship": {"pos": [x, y, z], "vel": [vx, vy, vz], "frame": int,
+              "real_t": float} | omitted}
     "sys" identifies the star system (NMS universe address as hex); it
     changes on warp. "home" is where NMS generated the planet, captured the
     first time the adapter saw the system.
+    Optional "ship" (only while a valid ship node is found): "pos" is the
+    ship's absolute NMS position in metres, "vel" its velocity in metres per
+    REAL second, from finite differences of "pos" over real time (smoothed over
+    the last 5 frames; the adapter never calls cGcSpaceshipComponent.GetVelocity),
+    "frame" is the adapter's frame counter and "real_t" is time.monotonic() at
+    the sample. The coordinator mirrors a ship report that is younger than 0.5 s
+    into KSP (see coordinator.py).
 
 coordinator -> NMS adapter (port NMS_CMD_PORT):
     {"t": "nms_targets", "seq": int, "sys": str, "game_t": float, "warp": float,

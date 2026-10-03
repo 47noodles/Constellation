@@ -10,6 +10,7 @@ HELP = """usage: python tools/cctl.py <command> [args]
   warp <rate>                 game-time multiplier, e.g. warp 30, warp 100
   pause | resume
   map on|off                  KSP map view
+  mirror on|off               copy the NMS ship into KSP (on by default with --ksp)
   burn <prograde> [normal] [radial]     instant burn now, m/s
   plan <from> <to>            find the next transfer window, e.g. plan p1 p2
   node <ut> <prograde> [normal] [radial]  add a maneuver node (shows in KSP map)
@@ -51,6 +52,8 @@ def main(argv):
         msg = {"t": cmd}
     elif cmd == "map":
         msg = {"t": "map", "on": (args[0] if args else "on") != "off"}
+    elif cmd == "mirror":
+        msg = {"t": "mirror", "on": (args[0] if args else "on") != "off"}
     elif cmd == "burn":
         p, n, r = floats(args, 3)
         msg = {"t": "burn", "prograde": p, "normal": n, "radial": r}
