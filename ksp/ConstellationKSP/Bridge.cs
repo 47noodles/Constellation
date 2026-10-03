@@ -10,6 +10,7 @@
 //   bodyorbit <body> <smaScale>           rewrite a body's orbit semi-major axis
 //   map on|off                            KSP's real map view
 //   warp <index>                          TimeWarp.SetRate
+//   rails on|off                          rails guard (default on): repack the active vessel if it goes off rails
 //   dismiss                               close PopupDialogs
 //   ui find|hide <substring>              list or hide active UI objects (e.g. the 1.12 "What's new" window)
 //   shot <file.png>                       screenshot (works without focus)
@@ -63,6 +64,8 @@ namespace Constellation
         private const int Port = 47821;
         private static UdpClient udp; // survives scene reloads
         private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+        private static bool railsGuard = true; // "rails on|off", default on
+        private static int railsRepacks;       // times the guard put the active vessel back on rails
 
         private void Start()
         {
@@ -77,6 +80,7 @@ namespace Constellation
 
         private void Update()
         {
+            RailsGuard();
             for (int i = 0; i < 8 && udp != null && udp.Available > 0; i++)
             {
                 IPEndPoint from = new IPEndPoint(IPAddress.Any, 0);
@@ -89,6 +93,17 @@ namespace Constellation
                 byte[] outb = Encoding.UTF8.GetBytes(reply);
                 udp.Send(outb, outb.Length, from);
             }
+        }
+
+        // While the rails guard is on, an active vessel that comes off rails is put
+        // straight back on. The count is reported by "info" as rails_repacks.
+        private void RailsGuard()
+        {
+            if (!railsGuard) return;
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null || v.packed) return;
+            v.GoOnRails();
+            railsRepacks++;
         }
 
         private string Handle(string[] w)
@@ -105,6 +120,9 @@ namespace Constellation
                 case "warp":
                     TimeWarp.SetRate(int.Parse(w[1], Inv), true, false);
                     return "{\"ok\":true,\"rate\":" + N(TimeWarp.CurrentRate) + "}";
+                case "rails":
+                    railsGuard = !(w.Length > 1 && w[1] == "off");
+                    return "{\"ok\":true,\"rails\":" + (railsGuard ? "true" : "false") + "}";
                 case "dismiss":
                     int closed = 0;
                     foreach (PopupDialog pd in FindObjectsOfType<PopupDialog>()) { pd.Dismiss(); closed++; }
@@ -171,6 +189,8 @@ namespace Constellation
             var sb = new StringBuilder("{");
             sb.Append("\"ut\":").Append(N(Planetarium.GetUniversalTime()));
             sb.Append(",\"warp\":").Append(N(TimeWarp.CurrentRate));
+            sb.Append(",\"rails_guard\":").Append(railsGuard ? "true" : "false");
+            sb.Append(",\"rails_repacks\":").Append(railsRepacks);
             sb.Append(",\"map\":").Append(MapView.MapIsEnabled ? "true" : "false");
             Vessel v = FlightGlobals.ActiveVessel;
             if (v != null) sb.Append(",\"vessel\":").Append(VesselJson(v));
@@ -296,6 +316,7 @@ namespace Constellation
             v.orbit.UpdateFromUT(ut);
             if (v.orbitDriver != null) v.orbitDriver.updateMode = OrbitDriver.UpdateMode.UPDATE;
             if (v.patchedConicSolver != null) v.patchedConicSolver.Update();
+            MarkInSpace(v, b);
             return "{\"ok\":true,\"vessel\":" + VesselJson(v) + "}";
         }
 
@@ -359,6 +380,7 @@ namespace Constellation
             v.orbit.Init();
             v.orbit.UpdateFromUT(ut);
             if (v.patchedConicSolver != null) v.patchedConicSolver.Update();
+            MarkInSpace(v, b);
             return "{\"ok\":true,\"ut\":" + N(ut) + ",\"vessel\":" + VesselJson(v) + "}";
         }
 
@@ -381,6 +403,7 @@ namespace Constellation
             o.Init();
             o.UpdateFromUT(ut);
             if (v.patchedConicSolver != null) v.patchedConicSolver.Update();
+            MarkInSpace(v, o.referenceBody);
             return "{\"ok\":true,\"ut\":" + N(ut) + ",\"vessel\":" + VesselJson(v) + "}";
         }
 
@@ -493,6 +516,23 @@ namespace Constellation
                 n++;
             }
             return n;
+        }
+
+        // Put a vessel just placed on an orbit into a coherent in-space situation so
+        // KSP accepts rails warp instead of refusing because it still reads
+        // LANDED/PRELAUNCH. KSP 1.12.5 has no public UpdateVesselSituation; the
+        // public UpdateLandedSplashed plus an explicit situation is the equivalent.
+        private static void MarkInSpace(Vessel v, CelestialBody b)
+        {
+            v.Landed = false;
+            v.Splashed = false;
+            v.UpdateLandedSplashed();
+            v.Landed = false;
+            v.Splashed = false;
+            double peR = v.orbit.semiMajorAxis * (1.0 - v.orbit.eccentricity);
+            if (v.orbit.eccentricity >= 1.0) v.situation = Vessel.Situations.ESCAPING;
+            else if (peR > b.Radius + b.atmosphereDepth) v.situation = Vessel.Situations.ORBITING;
+            else v.situation = Vessel.Situations.SUB_ORBITAL;
         }
 
         private static CelestialBody Body(string name)
