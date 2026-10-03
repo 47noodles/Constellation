@@ -14,12 +14,20 @@ NMS adapter -> coordinator (port NMS_STATE_PORT):
 
 coordinator -> NMS adapter (port NMS_CMD_PORT):
     {"t": "nms_targets", "seq": int, "sys": str, "game_t": float, "warp": float,
+     "mode": "orbit" | "flight",
      "targets": {"<slot>": [x, y, z]}, "vel_per_real_s": {"<slot>": [vx, vy, vz]}}
     Absolute NMS positions at send time, plus velocity per real second (warp
     already applied) so the adapter can extrapolate between messages. The
-    adapter ignores targets for another "sys".
+    adapter ignores targets for another "sys". "mode" says how to place the
+    optional "ship":
+      "orbit"  shift the ship scene node to the target (on rails, KSP/patched);
+      "flight" pose the player with cGcPlayer.SetToPosition (powered flight).
     Optional "ship": {"body": id, "pos": [x, y, z], "vel_per_real_s": [...],
-    "alt_m": float}: where the ship KSP is flying should be drawn in NMS.
+    "alt_m": float, "pose": {"forward": [x, y, z], "up": [x, y, z]}}.
+    "pos"/"vel_per_real_s" are in NMS axes as before; "pose" is two unit
+    vectors in NMS axes used only in "flight" mode to face the ship (the native
+    SetToPosition call takes forward and velocity but has no up argument, so
+    "up" is carried for callers and not passed).
 """
 
 from __future__ import annotations

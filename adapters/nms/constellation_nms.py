@@ -4,22 +4,33 @@ Every rendered frame, on the game thread:
 1. take the coordinator's newest planet targets (UDP 127.0.0.1:47811) and move
    each planet there (scene node + logical position, the method proven on
    2 Oct 2026);
-2. every second frame, report the player position and the planets to the
+2. move the ship or pose the player for the optional "ship" target, according
+   to "mode" ("orbit" shifts the ship scene node; "flight" poses the player);
+3. every second frame, report the player position and the planets to the
    coordinator (UDP 127.0.0.1:47812).
 
-Safety: a move larger than GUARD_STEP_M in one frame is refused if the planet is,
-or would end up, within GUARD_NEAR_M of the player (the planet under you, or one
-being moved onto you). Moving a nearby planet *away* is allowed. Refused moves
-are counted in `adapter status`. The coordinator anchors the player's planet, so
-this should never trigger.
+Ship rendering (docs/transfer-land-design.md section 5): cGcSpaceshipComponent.
+GetVelocity access-violates on build 180383, so it is never called. Orbit uses
+Engine.ShiftAllTransformsForNode on the ship scene node; flight uses cGcPlayer.
+SetToPosition, both proven in spikes/nms/mods. The transform maths lives in the
+offline-testable adapters/nms/transforms.py.
+
+Safety: a move larger than GUARD_STEP_M in one frame is refused if the planet (or
+the ship scene node) is, or would end up, within GUARD_NEAR_M of the player (the
+body under you, or one being moved onto you). Moving a nearby body *away* is
+allowed. Refused moves are counted in `adapter status`. The coordinator anchors
+the player's planet, so this should never trigger.
 
 Status through ctl_player's channel:  python spikes/nms/ctl.py adapter status
 """
 
 import builtins
+import ctypes
+import importlib.util
 import json
 import logging
 import math
+import os
 import socket
 import time
 
@@ -29,6 +40,27 @@ import nmspy.data.basic_types as basic
 import nmspy.data.types as nms
 from nmspy.common import gameData
 from nmspy.engine import GetNodeAbsoluteTransMatrix, ShiftAllTransformsForNode
+
+
+def _load_transforms():
+    """Load the pure transform module by path, so it works both as a package
+    import (tests) and when this file is loaded directly by pyMHF from anywhere
+    (the mods folder) with no package context."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    while True:
+        candidate = os.path.join(here, "adapters", "nms", "transforms.py")
+        if os.path.isfile(candidate):
+            spec = importlib.util.spec_from_file_location("constellation_nms_transforms", candidate)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        parent = os.path.dirname(here)
+        if parent == here:
+            raise ImportError(f"adapters/nms/transforms.py not found above {__file__}")
+        here = parent
+
+
+transforms = _load_transforms()
 
 logger = logging.getLogger("constellation_nms")
 
@@ -71,6 +103,9 @@ class ConstellationNMS4(Mod):
         self.applied_game_t = None  # coordinator game time the planets were last placed for
         self.latest = None  # newest target message
         self.latest_at = 0.0  # perf_counter when it arrived
+        self.ship_applied = 0
+        self.ship_refused = 0
+        self.ship_mode = None  # newest ship mode acted on: orbit | flight | none
         logger.info("Constellation NMS adapter loaded")
 
     # ---- game reads ----------------------------------------------------------
@@ -96,6 +131,84 @@ class ConstellationNMS4(Mod):
                 continue  # empty slot
             out.append((slot, planet))
         return out
+
+    # ---- ship / player pose --------------------------------------------------
+    def _ship_node(self):
+        """The owned, valid ship scene node nearest the player (the one being
+        flown), from game_state.mPlayerShipOwnership.mShips. None if unavailable.
+        Mirrors the proven spikes/nms/mods/ctl_pose3.py lookup."""
+        gs = gameData.game_state
+        if gs is None:
+            return None
+        try:
+            ships = gs.mPlayerShipOwnership.mShips
+        except Exception:  # noqa: BLE001 - a missing/partial struct is not fatal
+            return None
+        player = gameData.player
+        player_pos = None
+        if player is not None:
+            try:
+                m = GetNodeAbsoluteTransMatrix(player.mRootNode)
+                player_pos = (m.pos.x, m.pos.y, m.pos.z)
+            except Exception:  # noqa: BLE001
+                player_pos = None
+        best = None
+        best_d = None
+        for sd in ships:
+            try:
+                if not sd.mbUnknown0x28:  # "is valid/data"
+                    continue
+                node = sd.mPlayerShipNode
+                m = GetNodeAbsoluteTransMatrix(node)
+            except Exception:  # noqa: BLE001 - empty slots hold junk handles
+                continue
+            if player_pos is None:
+                return node
+            q = (m.pos.x, m.pos.y, m.pos.z)
+            d = (q[0] - player_pos[0]) ** 2 + (q[1] - player_pos[1]) ** 2 + (q[2] - player_pos[2]) ** 2
+            if best_d is None or d < best_d:
+                best, best_d = node, d
+        return best
+
+    def _set_pose(self, pos, forward, up, vel=(0.0, 0.0, 0.0)):
+        """Pose the player with cGcPlayer.SetToPosition (proven live in
+        spikes/nms/mods/ctl_player.py:137). ``up`` is part of the designed
+        interface but the native call (types.py:1584) takes only position,
+        direction and velocity, so up is carried for callers and not passed.
+        None of these calls are GetVelocity."""
+        player = gameData.player
+        if player is None:
+            return False
+        del up
+        p = basic.cTkBigPos(basic.Vector3f(pos[0], pos[1], pos[2]), basic.Vector3f(0.0, 0.0, 0.0))
+        direction = basic.Vector3f(forward[0], forward[1], forward[2])
+        velocity = basic.Vector3f(vel[0], vel[1], vel[2])
+        player.SetToPosition(ctypes.byref(p), ctypes.byref(direction), ctypes.byref(velocity))
+        return True
+
+    def _apply_ship(self, latest, player_pos, age):
+        """Move the ship node ("orbit") or pose the player ("flight") per the
+        coordinator's optional ship target. Never calls GetVelocity."""
+        ship = latest.get("ship")
+        mode = latest.get("mode", "orbit")
+        node = None
+        node_pos = None
+        if ship and mode != "flight":
+            node = self._ship_node()
+            if node is not None:
+                m = GetNodeAbsoluteTransMatrix(node)
+                node_pos = (m.pos.x, m.pos.y, m.pos.z)
+        action = transforms.plan_ship(ship, mode, node_pos=node_pos, age=age)
+        self.ship_mode = action.mode
+        if action.mode == "orbit" and node is not None:
+            if not transforms.guard_allows(action.delta, node_pos, player_pos, GUARD_STEP_M, GUARD_NEAR_M):
+                self.ship_refused += 1
+                return
+            ShiftAllTransformsForNode(node, basic.Vector3f(action.delta[0], action.delta[1], action.delta[2]))
+            self.ship_applied += 1
+        elif action.mode == "flight":
+            if self._set_pose(action.pos, action.forward, action.up, action.vel):
+                self.ship_applied += 1
 
     # ---- per frame -------------------------------------------------------------
     @nms.cGcApplication.Update.after
@@ -166,6 +279,7 @@ class ConstellationNMS4(Mod):
             ShiftAllTransformsForNode(planet.mNode, basic.Vector3f(dx, dy, dz))
             cur.x, cur.y, cur.z = target[0], target[1], target[2]
             self.applied += 1
+        self._apply_ship(latest, player, age)
 
     def _report(self, sys_key, planets, homes, player):
         self.seq += 1
@@ -186,5 +300,7 @@ class ConstellationNMS4(Mod):
             "sys": sys_key, "frame": self.frame, "frame_ms": round(self.frame_ms, 1),
             "applied_moves": self.applied, "refused_moves": self.refused,
             "last_target_seq": self.last_target_seq, "last_target_sys": self.last_target_sys,
+            "ship_applied": self.ship_applied, "ship_refused": self.ship_refused,
+            "ship_mode": self.ship_mode,
             "homes": self.homes.get(sys_key), "last_error": self.last_error,
         }

@@ -22,9 +22,13 @@ import itertools
 import json
 import math
 import socket
+from typing import TYPE_CHECKING
 
 from .orbits import Orbit, Vec, cross, dot, norm, unit
 from .universe import STAR, Universe
+
+if TYPE_CHECKING:
+    from .maneuver import ManeuverNode
 
 KSP_ADDR = ("127.0.0.1", 47821)
 POOL = ["Moho", "Eve", "Kerbin", "Duna", "Dres", "Jool", "Eeloo"]
@@ -67,6 +71,11 @@ def position_from_elements(el: dict, mu: float, t: float) -> Vec:
     h = (math.sin(inc) * math.sin(lan), -math.sin(inc) * math.cos(lan), math.cos(inc))
     in_plane = cross(h, node)
     return tuple(el["sma"] * (math.cos(u) * node[k] + math.sin(u) * in_plane[k]) for k in range(3))
+
+
+def add_node_cmd(node: ManeuverNode) -> str:
+    """The exact addnode line: "addnode <ut> <prograde> <normal> <radial>"."""
+    return "addnode {!r} {!r} {!r} {!r}".format(node.ut, node.prograde, node.normal, node.radial)
 
 
 def assignment(universe: Universe) -> dict[str, str]:
@@ -243,7 +252,8 @@ class KspLink:
     # Replies carry no request id, and replies to fired "setut"s can still be in
     # flight, so each request only accepts a reply with the key its command returns.
     REPLY_KEY = {"orbitpos": "bodies", "positions": "bodies", "setbody": "body", "setgm": "body",
-                 "parkmoons": "parked", "map": "map", "info": "bodies", "vesselstate": "r", "setut": "ut", "burn": "vessel"}
+                 "parkmoons": "parked", "map": "map", "info": "bodies", "vesselstate": "r", "setut": "ut", "burn": "vessel",
+                 "addnode": "node", "clearnodes": "nodes", "readnodes": "nodes"}
 
     def request(self, cmd: str, timeout: float = 2.0) -> dict | None:
         import time
@@ -290,6 +300,35 @@ class KspLink:
         r = zup(rot_z(tuple(vs["r"]), -off))  # zup() swaps y and z, so it is its own inverse
         v = zup(rot_z(tuple(vs["v"]), -off))
         return {"body": bid, "r": r, "v": v, "ut": vs["ut"]}
+
+    def add_node(self, node: ManeuverNode, timeout: float = 2.0) -> dict | None:
+        """Add a maneuver node to the active vessel; returns the node object or None."""
+        reply = self.request(add_node_cmd(node), timeout=timeout)
+        return reply.get("node") if reply else None
+
+    def clear_nodes(self, timeout: float = 2.0) -> dict | None:
+        """Remove every maneuver node."""
+        return self.request("clearnodes", timeout=timeout)
+
+    def read_nodes(self, timeout: float = 2.0) -> list[dict] | None:
+        """List the active vessel's maneuver nodes, inner to outer."""
+        reply = self.request("readnodes", timeout=timeout)
+        return reply.get("nodes") if reply else None
+
+    def execute_node(self, node: ManeuverNode, timeout: float = 2.0) -> dict | None:
+        """Wait until game time reaches node.ut, then issue the existing burn with its components."""
+        import time
+
+        while True:
+            info = self.request("info", timeout=timeout)
+            if info is None:
+                return None
+            ut = info.get("ut")
+            if ut is None or ut >= node.ut:
+                break
+            time.sleep(min(0.05, max(0.0, node.ut - ut)))
+        return self.request(
+            "burn {!r} {!r} {!r}".format(node.prograde, node.normal, node.radial), timeout=timeout)
 
     def worst_error(self, universe: Universe) -> float | None:
         """Largest planet position error in KSP's frame after removing its rotation (m)."""

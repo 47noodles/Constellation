@@ -13,6 +13,9 @@
 //   dismiss                               close PopupDialogs
 //   ui find|hide <substring>              list or hide active UI objects (e.g. the 1.12 "What's new" window)
 //   shot <file.png>                       screenshot (works without focus)
+//   addnode <ut> <prograde> <normal> <radial> add a maneuver node to the active vessel (on rails)
+//   clearnodes                            remove every maneuver node (on rails)
+//   readnodes                             list maneuver nodes, inner to outer (on rails)
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -130,6 +133,13 @@ namespace Constellation
                 case "burn":
                     // burn <prograde> <normal> <radial>  (m/s, instantaneous, vessel must be on rails)
                     return Burn(D(w[1]), D(w[2]), D(w[3]));
+                case "addnode":
+                    // addnode <ut> <prograde> <normal> <radial>  (m/s, vessel must be on rails)
+                    return AddNode(D(w[1]), D(w[2]), D(w[3]), D(w[4]));
+                case "clearnodes":
+                    return ClearNodes();
+                case "readnodes":
+                    return ReadNodes();
                 case "orbitpos":
                     return OrbitPositions();
                 case "vesselstate":
@@ -372,6 +382,55 @@ namespace Constellation
             o.UpdateFromUT(ut);
             if (v.patchedConicSolver != null) v.patchedConicSolver.Update();
             return "{\"ok\":true,\"ut\":" + N(ut) + ",\"vessel\":" + VesselJson(v) + "}";
+        }
+
+        // Add a maneuver node to the active vessel's patched conic solver so it draws in
+        // KSP's map view. DeltaV components are in the node's own prograde/normal/radial frame.
+        private static string AddNode(double ut, double prograde, double normal, double radial)
+        {
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null) throw new InvalidOperationException("no active vessel");
+            if (!v.packed) throw new InvalidOperationException("vessel is not on rails: time-warp first");
+            if (v.patchedConicSolver == null) throw new InvalidOperationException("no patched conic solver");
+            ManeuverNode node = v.patchedConicSolver.AddManeuverNode(ut);
+            node.DeltaV = new Vector3d(prograde, normal, radial);
+            node.UT = ut;
+            v.patchedConicSolver.Update();
+            int index = v.patchedConicSolver.maneuverNodes.IndexOf(node);
+            return "{\"ok\":true,\"node\":" + NodeJson(index < 0 ? 0 : index, node) + "}";
+        }
+
+        private static string ClearNodes()
+        {
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null) throw new InvalidOperationException("no active vessel");
+            if (!v.packed) throw new InvalidOperationException("vessel is not on rails: time-warp first");
+            if (v.patchedConicSolver == null) throw new InvalidOperationException("no patched conic solver");
+            List<ManeuverNode> nodes = v.patchedConicSolver.maneuverNodes;
+            for (int i = nodes.Count - 1; i >= 0; i--) v.patchedConicSolver.RemoveManeuverNode(nodes[i]);
+            v.patchedConicSolver.Update();
+            return "{\"ok\":true,\"nodes\":[]}";
+        }
+
+        private static string ReadNodes()
+        {
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null) throw new InvalidOperationException("no active vessel");
+            if (v.patchedConicSolver == null) throw new InvalidOperationException("no patched conic solver");
+            List<ManeuverNode> nodes = v.patchedConicSolver.maneuverNodes;
+            var sb = new StringBuilder("{\"ok\":true,\"nodes\":[");
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append(NodeJson(i, nodes[i]));
+            }
+            return sb.Append("]}").ToString();
+        }
+
+        private static string NodeJson(int index, ManeuverNode n)
+        {
+            return "{\"index\":" + index + ",\"ut\":" + N(n.UT) + ",\"prograde\":" + N(n.DeltaV.x)
+                + ",\"normal\":" + N(n.DeltaV.y) + ",\"radial\":" + N(n.DeltaV.z) + "}";
         }
 
         private static string SetVesselStateCoord(CelestialBody b, Vector3d r, Vector3d vel,
